@@ -1,0 +1,125 @@
+name: Build DXMT d9mt-wined3d
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DXMT_REPOSITORY: dacevedo12/dxmt
+  DXMT_REF: d9mt-wined3d
+  LLVM_VERSION: llvmorg-15.0.7
+  WINE_URL: https://github.com/3Shain/wine/releases/download/v8.16-3shain/wine.tar.gz
+
+jobs:
+  build:
+    name: Build DXMT on macOS
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout DXMT branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DXMT_REPOSITORY }}
+          ref: ${{ env.DXMT_REF }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euxo pipefail
+          XCODE_APP="$(find /Applications -maxdepth 1 -name 'Xcode*.app' -print | sort | tail -n1)"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          xcrun --find metal
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          brew update
+          brew install cmake ninja meson mingw-w64
+          meson --version
+          x86_64-w64-mingw32-gcc --version
+          i686-w64-mingw32-gcc --version
+
+      - name: Download Wine
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p toolchains/wine
+          curl -SL "$WINE_URL" -o wine.tar.gz
+          tar -zxf wine.tar.gz -C toolchains/wine
+          rm wine.tar.gz
+
+      - name: Build LLVM 15 for macOS x86_64
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch "$LLVM_VERSION" https://github.com/llvm/llvm-project.git toolchains/llvm-project
+
+          cmake -B toolchains/llvm-darwin-build -S toolchains/llvm-project/llvm \
+            -DCMAKE_INSTALL_PREFIX="$(pwd)/toolchains/llvm-darwin" \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DLLVM_HOST_TRIPLE=x86_64-apple-darwin \
+            -DLLVM_ENABLE_ASSERTIONS=On \
+            -DLLVM_ENABLE_ZSTD=Off \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_TARGETS_TO_BUILD="" \
+            -DLLVM_BUILD_TOOLS=Off \
+            -DBUG_REPORT_URL="https://github.com/3Shain/dxmt" \
+            -DPACKAGE_VENDOR="DXMT" \
+            -DLLVM_VERSION_PRINTER_SHOW_HOST_TARGET_INFO=Off \
+            -G Ninja
+
+          cmake --build toolchains/llvm-darwin-build
+          cmake --install toolchains/llvm-darwin-build
+
+      - name: Build 64-bit DXMT
+        shell: bash
+        run: |
+          set -euxo pipefail
+          meson setup \
+            --cross-file build-win64.txt \
+            -Dnative_llvm_path=toolchains/llvm-darwin \
+            -Dwine_install_path=toolchains/wine \
+            -Denable_nvapi=true \
+            -Denable_nvngx=true \
+            build64 \
+            --buildtype release \
+            --prefix "$(pwd)/install" \
+            --strip
+
+          meson compile -C build64
+          meson install -C build64
+
+      - name: Build 32-bit DXMT
+        shell: bash
+        run: |
+          set -euxo pipefail
+          meson setup \
+            --cross-file build-win32.txt \
+            -Dwine_install_path=toolchains/wine \
+            build32 \
+            --buildtype release \
+            --prefix "$(pwd)/install" \
+            --strip
+
+          meson compile -C build32
+          meson install -C build32
+
+      - name: Package build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find install -maxdepth 4 -type f | sort
+          tar -czf dxmt-d9mt-wined3d-macos-wine.tar.gz -C install .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxmt-d9mt-wined3d-macos-wine
+          path: dxmt-d9mt-wined3d-macos-wine.tar.gz
+          if-no-files-found: error
