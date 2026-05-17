@@ -1,0 +1,158 @@
+name: Build CrossOver ntdll.so from fixed loader.c
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ntdll:
+    name: Build patched ntdll.so
+    runs-on: macos-15-intel
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+      CX_SOURCE_URL: "https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.1.0.tar.gz"
+      FIXED_LOADER_URL: "https://raw.githubusercontent.com/nedymax/builder/a862f80b1f550e54e2864f47fbc2da117f6e9537/loader.c"
+
+    steps:
+      - name: Check runner architecture
+        run: |
+          uname -a
+          test "$(uname -m)" = "x86_64"
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install bison flex pkg-config mingw-w64
+
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Download CrossOver 26.1.0 source
+        run: |
+          set -e
+
+          curl -L --retry 3 --retry-delay 10 \
+            -o crossover-sources-26.1.0.tar.gz \
+            "$CX_SOURCE_URL"
+
+          mkdir crossover-src
+          tar -xzf crossover-sources-26.1.0.tar.gz -C crossover-src
+
+      - name: Find CrossOver Wine source
+        run: |
+          set -e
+
+          LOADER="$(find crossover-src -type f -path '*/dlls/ntdll/unix/loader.c' | head -n 1 || true)"
+
+          if [ -z "$LOADER" ]; then
+            echo "Could not find dlls/ntdll/unix/loader.c"
+            echo "Top-level extracted folders:"
+            find crossover-src -maxdepth 5 -type d | head -n 200
+            exit 1
+          fi
+
+          WINE_DIR="${LOADER%/dlls/ntdll/unix/loader.c}"
+          WINE_DIR="$(cd "$WINE_DIR" && pwd)"
+
+          echo "Found original loader.c at: $LOADER"
+          echo "Absolute Wine source dir: $WINE_DIR"
+
+          test -f "$WINE_DIR/configure"
+
+          echo "WINE_DIR=$WINE_DIR" >> "$GITHUB_ENV"
+
+      - name: Replace loader.c with fixed version
+        run: |
+          set -e
+
+          TARGET="$WINE_DIR/dlls/ntdll/unix/loader.c"
+
+          echo "Replacing:"
+          echo "$TARGET"
+
+          cp "$TARGET" "$TARGET.original"
+
+          curl -L --retry 3 --retry-delay 5 \
+            -o "$TARGET" \
+            "$FIXED_LOADER_URL"
+
+          echo "Checking fixed loader.c..."
+
+          grep -n "ROSETTA_X87_PATH" "$TARGET"
+          grep -n "preloader_exec( char \*\*argv, const char \*image_path, WORD machine )" "$TARGET"
+          grep -n "preloader_exec( argv, image_path, machine );" "$TARGET"
+
+          if grep -nE '^[[:space:]]*if \(machine == IMAGE_FILE_MACHINE_AMD64\) machine = IMAGE_FILE_MACHINE_I386;' "$TARGET"; then
+            echo "ERROR: active AMD64 -> I386 fallback still exists"
+            exit 1
+          fi
+
+          if grep -nE '^[[:space:]]*if \(\(\(argv\[1\] = get_alternate_wineloader\( machine \)\)\)\) preloader_exec' "$TARGET"; then
+            echo "ERROR: active alternate wineloader preloader_exec still exists"
+            exit 1
+          fi
+
+          echo "loader.c replacement looks good."
+
+      - name: Configure CrossOver Wine source
+        run: |
+          set -e
+
+          echo "Using WINE_DIR=$WINE_DIR"
+          ls -la "$WINE_DIR"
+          test -f "$WINE_DIR/configure"
+
+          mkdir wine-build
+          cd wine-build
+
+          "$WINE_DIR/configure" \
+            --enable-win64 \
+            --without-x \
+            --without-freetype \
+            --without-cups \
+            --without-gstreamer \
+            --without-gnutls \
+            --without-sane \
+            --without-krb5 \
+            --without-netapi \
+            --without-pcap \
+            --without-pulse \
+            --without-openal \
+            --without-gphoto \
+            --without-v4l2 \
+            --without-vulkan
+
+      - name: Build only ntdll.so
+        run: |
+          set -e
+
+          cd wine-build
+          make -j"$(sysctl -n hw.logicalcpu)" dlls/ntdll/ntdll.so
+
+      - name: Verify patched ntdll.so
+        run: |
+          set -e
+
+          test -f wine-build/dlls/ntdll/ntdll.so
+
+          file wine-build/dlls/ntdll/ntdll.so
+          strings wine-build/dlls/ntdll/ntdll.so | grep ROSETTA_X87_PATH
+
+      - name: Prepare artifact
+        run: |
+          set -e
+
+          mkdir artifact
+
+          cp wine-build/dlls/ntdll/ntdll.so artifact/ntdll.so
+
+          file artifact/ntdll.so > artifact/build-info.txt
+          echo "" >> artifact/build-info.txt
+          strings artifact/ntdll.so | grep ROSETTA_X87_PATH >> artifact/build-info.txt
+          shasum -a 256 artifact/ntdll.so > artifact/SHA256SUMS.txt
+
+      - name: Upload patched ntdll.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossover-26-1-fixed-loader-ntdll-so
+          path: artifact/
