@@ -49,6 +49,7 @@ jobs:
           fi
 
           WINE_DIR="${LOADER%/dlls/ntdll/unix/loader.c}"
+          WINE_DIR="$(cd "$WINE_DIR" && pwd)"
 
           echo "Found original loader.c at: $LOADER"
           echo "Wine source dir: $WINE_DIR"
