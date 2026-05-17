@@ -1,0 +1,148 @@
+name: Build CrossOver 26.1 patched ntdll.so for rosettax87
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ntdll:
+    name: Build patched CrossOver ntdll.so
+    runs-on: macos-15-intel
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+      CX_SOURCE_URL: "https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.1.0.tar.gz"
+      X87_PATCH_URL: "https://github.com/WineAndAqua/wine/commit/ff17c18b618419d440bf9751f1c2406ebb83eeea.diff"
+
+    steps:
+      - name: Check runner architecture
+        run: |
+          uname -a
+          test "$(uname -m)" = "x86_64"
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install bison flex pkg-config mingw-w64
+
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Download CrossOver 26.1.0 source tarball
+        run: |
+          curl -L --retry 3 --retry-delay 10 \
+            -o crossover-sources-26.1.0.tar.gz \
+            "$CX_SOURCE_URL"
+
+          mkdir crossover-src
+          tar -xzf crossover-sources-26.1.0.tar.gz -C crossover-src
+
+      - name: Find CrossOver Wine source
+        run: |
+          set -e
+
+          LOADER="$(find crossover-src -type f -path '*/dlls/ntdll/unix/loader.c' | head -n 1 || true)"
+
+          if [ -z "$LOADER" ]; then
+            echo "loader.c not found directly. Trying nested source archives..."
+
+            mkdir -p nested-src
+
+            find crossover-src -type f \( \
+              -iname '*wine*.tar.gz' -o \
+              -iname '*wine*.tgz' -o \
+              -iname '*wine*.tar.xz' -o \
+              -iname '*wine*.tar.bz2' \
+            \) -print0 | while IFS= read -r -d '' archive; do
+              echo "Extracting nested archive: $archive"
+              mkdir -p "nested-src/$(basename "$archive")"
+              tar -xf "$archive" -C "nested-src/$(basename "$archive")" || true
+            done
+
+            LOADER="$(find nested-src -type f -path '*/dlls/ntdll/unix/loader.c' | head -n 1 || true)"
+          fi
+
+          if [ -z "$LOADER" ]; then
+            echo "Could not find dlls/ntdll/unix/loader.c"
+            find crossover-src -maxdepth 4 -type f | head -n 200
+            exit 1
+          fi
+
+          WINE_DIR="${LOADER%/dlls/ntdll/unix/loader.c}"
+
+          echo "Found loader.c at: $LOADER"
+          echo "Wine source dir: $WINE_DIR"
+
+          echo "WINE_DIR=$WINE_DIR" >> "$GITHUB_ENV"
+
+      - name: Apply rosettax87 loader patch
+        run: |
+          set -e
+
+          curl -L -o rosettax87-loader.diff "$X87_PATCH_URL"
+
+          cd "$WINE_DIR"
+
+          echo "Applying patch inside:"
+          pwd
+
+          git apply --verbose "$GITHUB_WORKSPACE/rosettax87-loader.diff"
+
+          echo "Checking patch marker:"
+          grep -n "ROSETTA_X87_PATH" dlls/ntdll/unix/loader.c
+
+      - name: Configure CrossOver Wine source
+        run: |
+          set -e
+
+          mkdir wine-build
+          cd wine-build
+
+          "$WINE_DIR/configure" \
+            --enable-win64 \
+            --without-x \
+            --without-freetype \
+            --without-cups \
+            --without-gstreamer \
+            --without-gnutls \
+            --without-sane \
+            --without-krb5 \
+            --without-netapi \
+            --without-pcap \
+            --without-pulse \
+            --without-openal \
+            --without-gphoto \
+            --without-v4l2 \
+            --without-vulkan
+
+      - name: Build only ntdll.so
+        run: |
+          set -e
+
+          cd wine-build
+          make -j"$(sysctl -n hw.logicalcpu)" dlls/ntdll/ntdll.so
+
+      - name: Verify patched ntdll.so
+        run: |
+          set -e
+
+          test -f wine-build/dlls/ntdll/ntdll.so
+
+          file wine-build/dlls/ntdll/ntdll.so
+          strings wine-build/dlls/ntdll/ntdll.so | grep ROSETTA_X87_PATH
+
+      - name: Prepare artifact
+        run: |
+          mkdir artifact
+
+          cp wine-build/dlls/ntdll/ntdll.so artifact/ntdll.so
+
+          file artifact/ntdll.so > artifact/build-info.txt
+          echo "" >> artifact/build-info.txt
+          strings artifact/ntdll.so | grep ROSETTA_X87_PATH >> artifact/build-info.txt
+          shasum -a 256 artifact/ntdll.so > artifact/SHA256SUMS.txt
+
+      - name: Upload patched ntdll.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossover-26-1-rosettax87-ntdll-so
+          path: artifact/
