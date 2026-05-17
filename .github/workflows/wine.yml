@@ -1,0 +1,86 @@
+name: Build patched Wine ntdll.so for CrossOver x87
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ntdll:
+    name: Build ntdll.so
+    runs-on: macos-13
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+
+    steps:
+      - name: Check runner architecture
+        run: |
+          uname -a
+          test "$(uname -m)" = "x86_64"
+
+      - name: Checkout patched Wine source
+        uses: actions/checkout@v4
+        with:
+          repository: WineAndAqua/wine
+          ref: wine-11.0-macos
+          path: wine-src
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install bison flex pkg-config mingw-w64
+
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Wine
+        run: |
+          mkdir wine-build
+          cd wine-build
+
+          ../wine-src/configure \
+            --enable-win64 \
+            --without-x \
+            --without-freetype \
+            --without-cups \
+            --without-gstreamer \
+            --without-gnutls \
+            --without-sane \
+            --without-krb5 \
+            --without-netapi \
+            --without-pcap \
+            --without-pulse \
+            --without-openal \
+            --without-gphoto \
+            --without-v4l2 \
+            --without-vulkan
+
+      - name: Build only ntdll.so
+        run: |
+          cd wine-build
+          make -j"$(sysctl -n hw.logicalcpu)" dlls/ntdll/ntdll.so
+
+      - name: Verify patched ntdll.so
+        run: |
+          cd wine-build
+
+          test -f dlls/ntdll/ntdll.so
+
+          file dlls/ntdll/ntdll.so
+          strings dlls/ntdll/ntdll.so | grep ROSETTA_X87_PATH
+
+      - name: Prepare artifact
+        run: |
+          mkdir artifact
+
+          cp wine-build/dlls/ntdll/ntdll.so artifact/ntdll.so
+
+          file artifact/ntdll.so > artifact/build-info.txt
+          strings artifact/ntdll.so | grep ROSETTA_X87_PATH >> artifact/build-info.txt
+          shasum -a 256 artifact/ntdll.so > artifact/SHA256SUMS.txt
+
+      - name: Upload ntdll.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-ntdll-so-wine-11-macos
+          path: artifact/
