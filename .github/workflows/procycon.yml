@@ -1,0 +1,80 @@
+name: Build Procyon macOS app
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Procyon
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout Procyon source
+        uses: actions/checkout@v4
+        with:
+          repository: italomandara/Procyon
+          ref: main
+          path: Procyon-src
+          fetch-depth: 1
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: List project schemes
+        run: |
+          cd Procyon-src
+          xcodebuild -list -project Procyon.xcodeproj
+
+      - name: Build Procyon
+        run: |
+          set -e
+
+          cd Procyon-src
+
+          xcodebuild \
+            -project Procyon.xcodeproj \
+            -scheme Procyon \
+            -configuration Release \
+            -derivedDataPath build \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Locate built app
+        run: |
+          set -e
+
+          APP_PATH="$(find Procyon-src/build -type d -name 'Procyon.app' | head -n 1)"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "Procyon.app not found"
+            find Procyon-src/build -maxdepth 6 -type d | sort
+            exit 1
+          fi
+
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "Found app at: $APP_PATH"
+
+      - name: Ad-hoc sign app
+        run: |
+          codesign --force --deep --sign - "$APP_PATH" || true
+          codesign --verify --deep --verbose=2 "$APP_PATH" || true
+
+      - name: Package app
+        run: |
+          set -e
+
+          mkdir artifact
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" artifact/Procyon.app.zip
+
+          shasum -a 256 artifact/Procyon.app.zip > artifact/SHA256SUMS.txt
+
+      - name: Upload Procyon app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Procyon-macOS-app
+          path: artifact/
