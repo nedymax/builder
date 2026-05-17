@@ -6,7 +6,7 @@ on:
 jobs:
   build-ntdll:
     name: Build ntdll.so
-    runs-on: macos-15
+    runs-on: macos-15-intel
 
     env:
       MACOSX_DEPLOYMENT_TARGET: "10.15"
